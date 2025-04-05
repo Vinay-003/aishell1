@@ -196,7 +196,7 @@ def execute_command(command):
         else:
             print(f"Command failed with exit code {e.returncode}")
         return False
-
+#added something her 
 class ProjectAnalyzer:
     """Analyzes project structure and dependencies across different project types"""
     
