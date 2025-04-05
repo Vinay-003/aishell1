@@ -1,5 +1,6 @@
 # This will generate ModuleNotFoundError since 'pandas' is likely not installed
 import pandas as pd
+import numpy as np
 
 def analyze_data():
     # Create a simple DataFrame
