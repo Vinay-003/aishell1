@@ -110,7 +110,7 @@ def execute_command(command):
         if result.stdout:
             print(result.stdout)
         return True
-        
+        #something changed
     except subprocess.CalledProcessError as e:
         if e.stderr:
             print(f"Error: {e.stderr}")
