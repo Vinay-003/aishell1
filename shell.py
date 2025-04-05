@@ -95,16 +95,53 @@ class AIAutoSuggest(AutoSuggest):
 
 def execute_command(command):
     try:
+        # Special handling for git commands
+        if command.startswith('git'):
+            # First check if we're in a git repository
+            try:
+                subprocess.run(['git', 'rev-parse', '--git-dir'], 
+                             check=True, capture_output=True, text=True)
+            except subprocess.CalledProcessError:
+                print("Error: Not a git repository (or any of the parent directories)")
+                return False
+
+            # For git commit, check if there are staged changes
+            if 'git commit' in command:
+                status = subprocess.run(['git', 'diff', '--cached', '--quiet'])
+                if status.returncode == 0:
+                    print("Error: No changes staged for commit. Use 'git add' first to stage changes.")
+                    print("Tip: Use 'git status' to see current changes")
+                    return False
+
+        # Execute the actual command
         result = subprocess.run(command, shell=True, check=True, text=True, 
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.stdout:
             print(result.stdout)
         return True
+        
     except subprocess.CalledProcessError as e:
         if e.stderr:
             print(f"Error: {e.stderr}")
         else:
             print(f"Command failed with exit code {e.returncode}")
+            
+        # Provide helpful tips for common git commands
+        if command.startswith('git'):
+            if 'commit' in command:
+                print("\nHelpful tips:")
+                print("1. Make sure you have staged your changes with 'git add'")
+                print("2. Check staged changes with 'git status'")
+                print("3. To stage and commit all changes, use 'git commit -a -m \"message\"'")
+            elif 'push' in command:
+                print("\nHelpful tips:")
+                print("1. Ensure you have committed your changes")
+                print("2. Check if you need to set upstream branch with 'git push -u origin <branch>'")
+            elif 'pull' in command:
+                print("\nHelpful tips:")
+                print("1. Make sure you have the correct remote configured")
+                print("2. Try 'git fetch' first to see available changes")
+        
         return False
 
 def main():
