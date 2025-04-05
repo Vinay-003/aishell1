@@ -14,6 +14,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.styles import Style
 from dotenv import load_dotenv
+import platform
 
 load_dotenv()
 
@@ -172,29 +173,29 @@ class AIAutoSuggest(AutoSuggest):
             return Suggestion(suggestion[len(typed_text):])
         return None
 
-def execute_command(command):
+def execute_command(command: str) -> bool:
+    """Execute a shell command with proper shell activation handling"""
     try:
-        # Basic git repository check
-        if command.startswith('git') and command != 'git --version':
-            try:
-                subprocess.run(['git', 'rev-parse', '--git-dir'], 
-                             check=True, capture_output=True, text=True)
-            except subprocess.CalledProcessError:
-                print("Error: Not a git repository")
-                return False
-
-        # Execute the command
-        result = subprocess.run(command, shell=True, check=True, text=True, 
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if result.stdout:
-            print(result.stdout)
-        return True
-        #something changed
+        # Special handling for virtual environment activation
+        if "venv" in command and ("activate" in command or "source" in command):
+            if platform.system().lower() == "windows":
+                # Windows activation
+                return subprocess.run(f"venv\\Scripts\\activate", shell=True, check=True).returncode == 0
+            else:
+                # Linux/Mac activation - use . instead of source
+                modified_command = command.replace("source", ".")
+                # Use bash explicitly for activation
+                return subprocess.run(modified_command, shell=True, executable='/bin/bash', check=True).returncode == 0
+        
+        # Regular command execution
+        return subprocess.run(command, shell=True, check=True).returncode == 0
     except subprocess.CalledProcessError as e:
+        print(f"Command failed: {e}")
         if e.stderr:
-            print(f"Error: {e.stderr}")
-        else:
-            print(f"Command failed with exit code {e.returncode}")
+            print(f"Error output: {e.stderr}")
+        return False
+    except Exception as e:
+        print(f"Error executing command: {str(e)}")
         return False
 #added something her 
 class ProjectAnalyzer:
@@ -440,6 +441,180 @@ def apply_fixes(analysis: Dict) -> bool:
         
     return success
 
+def detect_package_manager():
+    """Detect the system's package manager"""
+    package_managers = {
+        'apt-get': 'which apt-get',
+        'yum': 'which yum',
+        'dnf': 'which dnf',
+        'pacman': 'which pacman',
+        'brew': 'which brew'
+    }
+    
+    for pm, check_cmd in package_managers.items():
+        try:
+            subprocess.run(check_cmd, shell=True, check=True, capture_output=True)
+            return pm
+        except subprocess.CalledProcessError:
+            continue
+    return None
+
+def get_setup_commands(setup_request: str) -> List[Dict]:
+    """Convert setup request into a sequence of commands and file operations"""
+    try:
+        # First, get AI to analyze the request
+        analysis = client.chat.completions.create(
+            model=FALLBACK_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are an expert developer who can handle any kind of development request.
+                    This could include:
+                    - Writing code in any programming language
+                    - Creating setup/configuration files
+                    - Setting up project structures
+                    - Writing SQL queries
+                    - Creating scripts
+                    - Any other development task
+                    
+                    Analyze the request and return a JSON array of steps needed.
+                    Each step should have this structure:
+                    {
+                        "description": "what this step does",
+                        "operation": "file_create or command",
+                        "path": "path/to/file.ext" (for file_create),
+                        "content": "file contents or command to run",
+                        "type": "language or file type (python/java/sql/config/etc)"
+                    }"""
+                },
+                {
+                    "role": "user",
+                    "content": f"Handle this request: {setup_request}"
+                }
+            ],
+            max_tokens=1000,
+            temperature=0.1
+        )
+        
+        steps = json.loads(analysis.choices[0].message.content)
+        
+        # For each file_create step, generate the content
+        for step in steps:
+            if step['operation'] == 'file_create':
+                content_completion = client.chat.completions.create(
+                    model=FALLBACK_MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": f"""You are an expert in {step['type']}.
+                            Generate the file content based on the request.
+                            Include all necessary components (imports, classes, functions, error handling, comments, etc).
+                            RESPOND ONLY WITH THE FILE CONTENT."""
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Generate content for {step['path']}: {setup_request}"
+                        }
+                    ],
+                    max_tokens=2000,
+                    temperature=0.1
+                )
+                step['content'] = content_completion.choices[0].message.content.strip()
+        
+        return steps
+            
+    except Exception as e:
+        print(f"Error handling request: {str(e)}")
+        return []
+
+def execute_setup_step(step: Dict) -> bool:
+    """Execute a single setup step"""
+    try:
+        print(f"\nStep: {step['description']}")
+        
+        if step['operation'] == 'command':
+            command = step['content']
+            requires_sudo = step.get('requires_sudo', False)
+            
+            if requires_sudo:
+                print("Note: This step requires administrative privileges")
+            
+            print(f"Command to execute: {command}")
+            confirm = input("Execute this command? [y/N] ")
+            
+            if confirm.lower() == 'y':
+                try:
+                    return execute_command(command)
+                except Exception as e:
+                    print(f"Command failed: {str(e)}")
+                    return False
+                
+        elif step['operation'] in ['file_create', 'file_edit']:
+            path = step['path'].strip()
+            if not path:
+                print("Error: File path is empty")
+                return False
+                
+            print(f"File: {path}")
+            print("Content:")
+            print("---")
+            print(step['content'])
+            print("---")
+            
+            confirm = input(f"{'Create' if step['operation'] == 'file_create' else 'Edit'} this file? [y/N] ")
+            if confirm.lower() == 'y':
+                try:
+                    directory = os.path.dirname(path)
+                    if directory:
+                        os.makedirs(directory, exist_ok=True)
+                    
+                    mode = 'w' if step['operation'] == 'file_create' else 'a'
+                    with open(path, mode) as f:
+                        f.write(step['content'])
+                    print(f"Successfully {'created' if step['operation'] == 'file_create' else 'edited'} {path}")
+                    return True
+                except Exception as e:
+                    print(f"Error {'creating' if step['operation'] == 'file_create' else 'editing'} file: {str(e)}")
+                    return False
+            return False  # User declined
+            
+        print(f"Unknown operation: {step['operation']}")
+        return False
+        
+    except Exception as e:
+        print(f"Error executing step: {str(e)}")
+        return False
+
+def handle_setup_request(request: str):
+    """Handle a setup wizard request"""
+    print(f"\nAnalyzing setup request: {request}")
+    steps = get_setup_commands(request)
+    
+    if not steps:
+        print("Could not generate setup steps. Please try rephrasing your request.")
+        return
+        
+    print("\nProposed setup steps:")
+    for i, step in enumerate(steps, 1):
+        print(f"\n{i}. {step['description']}")
+        print(f"   Operation: {step['operation']}")
+        if 'path' in step:
+            print(f"   File: {step['path']}")
+            
+    confirm = input("\nWould you like to proceed with these steps? [y/N] ")
+    if confirm.lower() != 'y':
+        return
+        
+    for i, step in enumerate(steps, 1):
+        print(f"\nExecuting step {i}/{len(steps)}")
+        if not execute_setup_step(step):
+            print("Step failed. Stopping setup.")
+            confirm = input("Would you like to continue anyway? [y/N] ")
+            if confirm.lower() != 'y':
+                return
+                
+    print("\nSetup completed!")
+
 def main():
     style = Style.from_dict({
         'prompt': '#00aa00 bold',  # Green prompt
@@ -466,6 +641,11 @@ def main():
     def _(event):
         event.app.exit(result=None)
         raise KeyboardInterrupt()
+
+    @bindings.add("/")
+    def _(event):
+        """Handle setup wizard requests"""
+        event.app.current_buffer.text = "/"
 
     # Debounce suggestion requests
     last_fetch_time = 0
@@ -511,6 +691,15 @@ def main():
             if user_input.lower() in ("exit", "quit"):
                 break
 
+            # Handle setup wizard requests
+            if user_input.startswith("/"):
+                request = user_input[1:].strip()
+                if not request:
+                    print("Please provide a setup request after /")
+                    continue
+                handle_setup_request(request)
+                continue
+            
             # Handle error analysis
             if user_input.startswith("!error"):
                 error_msg = user_input[6:].strip()

@@ -1,7 +1,11 @@
 venv 
 folder_name
-a1
-a2
-test
+a1.py
+a2.py
+test.py
 .env 
 .env.local
+app.py
+calculator.py
+t2.py
+table.py
