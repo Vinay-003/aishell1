@@ -12,84 +12,158 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("deepseek_api"),
-    timeout=5.0
-)
+# At the top of your file, add this debug print
+print("Using OpenRouter API key:", os.getenv("deepseek_api")[:8] + "..." if os.getenv("deepseek_api") else "Not found")
 
 FALLBACK_MODEL = "openai/gpt-3.5-turbo:free"
 
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("deepseek_api"),
+    timeout=5.0,
+    default_headers={
+        "HTTP-Referer": "https://openrouter.ai/",  # Required for OpenRouter
+    }
+)
+
+# Test the API connection
+def test_api_connection():
+    try:
+        completion = client.chat.completions.create(
+            model=FALLBACK_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Say 'API connection successful'"}
+            ],
+            max_tokens=10
+        )
+        print("API Test Response:", completion.choices[0].message.content if completion.choices else "No response")
+        return True
+    except Exception as e:
+        print("API Test Error:", str(e))
+        return False
+
+# Call this at startup
+if test_api_connection():
+    print("OpenRouter API connection successful")
+else:
+    print("OpenRouter API connection failed")
+
+#something 
+
+
+# Global state management
 command_history = []
 current_suggestion = ""
 suggestion_lock = threading.Lock()
 last_request_time = 0
 
 def get_ai_suggestion(user_input):
+    """Get command completion suggestions from the AI model."""
     try:
         if len(user_input.strip()) < 3:
-            return None
+            return ""
 
+        # print(f"Requesting suggestion for: {user_input}")  # Debug print
         completion = client.chat.completions.create(
             model=FALLBACK_MODEL,
             messages=[
-                {"role": "system", "content": "Complete this shell command. ONE-LINE response."},
-                {"role": "user", "content": f"Complete: {user_input}"}
+                {
+                    "role": "system", 
+                    "content": "You are a command-line expert. Complete the given command. Respond ONLY with the completed command, no explanations. Focus on common commands like git, docker, npm, pip, cat, touch, sudo, ls, cd, mkdir, rm, cp, mv, pwd, echo, grep, chmod, chown, ps, kill, top, man, whoami, ifconfig, ping, curl, wget, tar, unzip, zip, ssh, scp, find, history, clear, alias, df, du, nano, vi, apt, yum, dnf, pacman, service, systemctl, hostname, env, export, date, time, python, node, java, javac, gcc, make, htop, tmux, screen, netstat, traceroute, dig, npm, npx, pip3, virtualenv, conda, which, whereis, uname, lsb_release  etc . look out for other commands too",
+                },
+                {
+                    "role": "user", 
+                    "content": f"Complete this command: {user_input}"
+                }
             ],
-            max_tokens=10,
-            temperature=0.1,
+            max_tokens=50,
+            temperature=0.1
         )
         
         if not completion or not completion.choices:
-            return None
+            return ""
             
         suggestion = completion.choices[0].message.content.strip()
         suggestion = suggestion.split("\n")[0].split("#")[0].strip().strip('"').strip("'")
         
-        if not suggestion or suggestion == user_input:
-            return None
-        if not suggestion.startswith(user_input):
-            return user_input + suggestion
-            
+        # Ensure suggestion starts with user input
+        if suggestion and not suggestion.startswith(user_input):
+            suggestion = user_input + suggestion
+        elif suggestion == user_input:
+            suggestion += " "
+        
+        # print(f"Got suggestion: {suggestion}")  # Debug print
         return suggestion
-    except (APIConnectionError, Exception):
-        return None
+        
+    except Exception as e:
+        print(f"[Error] AI suggestion failed: {str(e)}")
+        return ""
 
 def get_shell_command(query):
     """Convert natural language query to shell command"""
     try:
+        # print(f"Sending query to AI: {query}")  # Debug print
         completion = client.chat.completions.create(
-            model=FALLBACK_MODEL,
+            model="openai/gpt-3.5-turbo:free",
             messages=[
-                {"role": "system", "content": "Convert natural language to a shell command. Respond ONLY with the command, no explanations."},
-                {"role": "user", "content": query}
+                {
+                    "role": "system", 
+                    "content": """You are a command-line expert. Convert natural language queries into appropriate shell commands.
+                    For file operations, prefer simple commands like touch, echo, mkdir, etc.
+                    Respond ONLY with the command, no explanations or additional text."""
+                },
+                {
+                    "role": "user", 
+                    "content": f"Convert this to a shell command: {query}"
+                }
             ],
             max_tokens=50,
-            temperature=0.1,
+            temperature=0.1
         )
         
         if not completion or not completion.choices:
+            print(f"API Response: {completion}")  # Debug print
             return None
             
         command = completion.choices[0].message.content.strip()
         command = command.split("\n")[0].split("#")[0].strip().strip('"').strip("'")
         
+        print(f"Generated command: {command}")  # Debug print
         return command
-    except (APIConnectionError, Exception):
+        
+    except Exception as e:
+        print(f"Error in get_shell_command: {type(e).__name__}: {str(e)}")
         return None
+def fetch_suggestion_async(text, session):
+    """Fetch suggestions asynchronously to avoid blocking the UI."""
+    global current_suggestion
+    
+    if len(text.strip()) < 2:
+        with suggestion_lock:
+            current_suggestion = ""
+        return
+        
+    suggestion = get_ai_suggestion(text)
+    
+    with suggestion_lock:
+        current_suggestion = suggestion
+    
+    # Force a refresh of the UI
+    if session.app:
+        session.app.invalidate()
 
 class AIAutoSuggest(AutoSuggest):
+    """Custom AutoSuggest class for AI-powered command completion."""
     def get_suggestion(self, _buffer, document):
-        global current_suggestion
         typed_text = document.text
-        
-        if not typed_text.strip() or typed_text.startswith("?"):
+        if not typed_text.strip():
             return None
             
         with suggestion_lock:
             suggestion = current_suggestion
             
-        if suggestion and suggestion.startswith(typed_text):
+        if suggestion and suggestion.startswith(typed_text) and suggestion != typed_text:
             return Suggestion(suggestion[len(typed_text):])
         return None
 
@@ -120,54 +194,51 @@ def execute_command(command):
 
 def main():
     style = Style.from_dict({
-        'prompt': '#00aa00 bold',
-        'command': '#0000ff bold',
+        'prompt': '#00aa00 bold',  # Green prompt
+        'suggestion': '#666666 italic',  # Gray suggestions
     })
     
     session = PromptSession(
         auto_suggest=AIAutoSuggest(),
         style=style,
-        complete_while_typing=True
+        complete_while_typing=True,
+        complete_in_thread=True
     )
     
     bindings = KeyBindings()
 
     @bindings.add("tab")
+    @bindings.add("right")
     def _(event):
         buff = event.app.current_buffer
         if buff.suggestion:
             buff.insert_text(buff.suggestion.text)
-
-    @bindings.add("enter")
-    def _(event):
-        buff = event.app.current_buffer
-        text = buff.text.strip()
-        if text:  # Only accept if there's actual text
-            event.app.exit(result=text)
 
     @bindings.add("c-c")
     def _(event):
         event.app.exit(result=None)
         raise KeyboardInterrupt()
 
-    def update_suggestion(text):
-        global current_suggestion, last_request_time
-        suggestion = get_ai_suggestion(text)
-        if suggestion:
-            with suggestion_lock:
-                current_suggestion = suggestion
-
+    # Debounce suggestion requests
+    last_fetch_time = 0
+    min_delay_between_fetches = 0.3  # 300ms minimum delay between fetches
+    
     def on_text_changed(_):
+        nonlocal last_fetch_time
+        current_time = time.time()
+        
+        if current_time - last_fetch_time < min_delay_between_fetches:
+            return
+            
+        last_fetch_time = current_time
         buffer_text = session.default_buffer.document.text
-        if len(buffer_text.strip()) < 3 or buffer_text.startswith("?"):
-            with suggestion_lock:
-                global current_suggestion
-                current_suggestion = ""
+        
+        if buffer_text.startswith("?") or len(buffer_text.strip()) < 2:
             return
             
         threading.Thread(
-            target=update_suggestion,
-            args=(buffer_text,),
+            target=fetch_suggestion_async,
+            args=(buffer_text, session),
             daemon=True
         ).start()
 
@@ -175,7 +246,7 @@ def main():
 
     print("=== AI Shell ===")
     print("Type commands directly or start with ? for natural language (e.g., ?how to list all files)")
-    print("Press TAB to complete suggestions, ENTER to execute")
+    print("Press TAB or RIGHT ARROW to complete suggestions, ENTER to execute")
     
     while True:
         try:
@@ -199,16 +270,20 @@ def main():
                     continue
                     
                 print("Translating query...")
-                command = get_shell_command(query)
-                if not command:
-                    print("Failed to translate query")
+                try:
+                    command = get_shell_command(query)
+                    if not command:
+                        print("Could not generate a command for your query. Please try rephrasing it.")
+                        continue
+                        
+                    # print(f"Suggested command: {command}")
+                    confirm = session.prompt("Execute this command? [y/N] ")
+                    if confirm.lower() != 'y':
+                        continue
+                    user_input = command
+                except Exception as e:
+                    print(f"Error processing query: {str(e)}")
                     continue
-                    
-                print(f"Suggested command: {command}")
-                confirm = session.prompt("Execute this command? [y/N] ")
-                if confirm.lower() != 'y':
-                    continue
-                user_input = command
 
             command_history.append(user_input)
             with suggestion_lock:

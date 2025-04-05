@@ -18,7 +18,7 @@ client = OpenAI(
     api_key=os.getenv("deepseek_api"),
 )
 
-FALLBACK_MODEL = "openai/gpt-3.5-turbo:free"
+FALLBACK_MODEL = "deepseek/deepseek-v3-base:free"
 
 command_history = []
 current_suggestion = ""
@@ -65,7 +65,7 @@ def fetch_suggestion_async(text, session, request_time):
         
     history = "\n".join(command_history)
     suggestion = get_ai_suggestion(text, history)
-    # print(f"DEBUG: Input='{text}', Suggestion='{suggestion}'")  # Temporary debug
+    print(f"DEBUG: Input='{text}', Suggestion='{suggestion}'")  # Temporary debuggit
     
     with suggestion_lock:
         if request_time >= last_request_time:
